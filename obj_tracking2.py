@@ -186,10 +186,10 @@ class objectTracker:
 
 # DL models for pedestrian detection and person re-identification
 model_det  = 'pedestrian-detection-adas-0002'           # 1,3,384,672 -> 1,1,200,7
-model_reid = 'person-reidentification-retail-0277'      # 1,3,256,128 -> 1,256
+model_reid = 'person-reidentification-retail-0286'      # 1,3,256,128 -> 1,256
 
-model_det  = './intel/{0}/FP16/{0}'.format(model_det)
-model_reid = './intel/{0}/FP16/{0}'.format(model_reid)
+model_det  = './intel/{0}/FP32/{0}'.format(model_det)
+model_reid = './intel/{0}/FP32/{0}'.format(model_reid)
 
 # Load boundary lines and areas from config
 with open('config2.yaml', 'r') as f:
@@ -208,14 +208,16 @@ def main():
     global boundaryLines, areas
     global model_det, model_reid
 
-    # Open USB webcam for real-time capture
-    cap = cv2.VideoCapture(1)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH , 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Open USB webcams (or a movie file)
+    
+    # cap = cv2.VideoCapture(2)
+    # cap.set(cv2.CAP_PROP_FRAME_WIDTH , 640)
+    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)   
+    
+    infile = 'samle3.mp4'
+    cap = cv2.VideoCapture(infile)
+    #'''
     ret, img = cap.read()
-    if not ret or img is None:
-        print("Error: Could not open webcam.")
-        return
     ih, iw, _ = img.shape
 
     # Device name could be 'CPU', 'GPU', 'GPU.0', 'NPU', etc.
@@ -243,35 +245,44 @@ def main():
     loop_count = 0
     start_time = time.perf_counter()
 
+
     try:
-        while cv2.waitKey(1) != 27:  # 27 == ESC
+        while cv2.waitKey(1)!=27:           # 27 == ESC
             ret, image = cap.read()
-            if not ret or image is None:
-                print("Warning: Camera frame not received.")
+            if ret==False:
+                del cap
+                cap = cv2.VideoCapture(infile)
                 continue
+
+            # Print frame shape and force window size
+            print(f"Frame shape: {image.shape}")
+            cv2.namedWindow('image', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('image', image.shape[1], image.shape[0])
+
             inBlob = cv2.resize(image, (model_det_shape[3], model_det_shape[2]))
             inBlob = inBlob.transpose((2,0,1))
             inBlob = inBlob.reshape(list(model_det_shape))
             res = ireq_det.infer({0: inBlob})
-            detObj = ireq_det.get_tensor('detection_out').data.reshape((200,7))
-
+            detObj = ireq_det.get_tensor('detection_out').data.reshape((200,7)) 
+   
             objects = []
-            for obj in detObj:
-                if obj[2] > 0.75:
+            for obj in detObj:                # obj = [ image_id, label, conf, xmin, ymin, xmax, ymax ]
+                if obj[2] > 0.75:             # Confidence > 75% 
                     xmin = abs(int(obj[3] * image.shape[1]))
                     ymin = abs(int(obj[4] * image.shape[0]))
                     xmax = abs(int(obj[5] * image.shape[1]))
                     ymax = abs(int(obj[6] * image.shape[0]))
                     class_id = int(obj[1])
 
-                    obj_img = image[ymin:ymax, xmin:xmax].copy()
+                    obj_img=image[ymin:ymax,xmin:xmax].copy()             # Crop the found object
 
+                    # Obtain feature vector of the detected object using re-identification model
                     inBlob = cv2.resize(obj_img, (model_reid_shape[3], model_reid_shape[2]))
                     inBlob = inBlob.transpose((2,0,1))
                     inBlob = inBlob.reshape(model_reid_shape)
                     res = ireq_reid.infer({0: inBlob})
-                    featVec = res[0][0].ravel()
-                    objects.append(object([xmin, ymin, xmax, ymax], featVec, -1))
+                    featVec = res[0][0].ravel()  # Get the feature vector of the object
+                    objects.append(object([xmin,ymin, xmax,ymax], featVec, -1))
 
             outimg = image.copy()
 
@@ -285,6 +296,7 @@ def main():
             checkAreaIntrusion(areas, objects)
             drawAreas(outimg, areas)
 
+            # Draw bounding boxes, IDs and trajectory
             for obj in objects:
                 id = obj.id
                 color = ( (((~id)<<6) & 0x100)-1, (((~id)<<7) & 0x0100)-1, (((~id)<<8) & 0x0100)-1 )
@@ -292,6 +304,7 @@ def main():
                 cv2.rectangle(outimg, (xmin, ymin), (xmax, ymax), color, 2)
                 cv2.putText(outimg, 'ID='+str(id), (xmin, ymin - 7), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
+            # Calculate and Draw FPS
             loop_count += 1
             if loop_count % fps_count == 0:
                 end_time = time.perf_counter()
@@ -305,7 +318,6 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
